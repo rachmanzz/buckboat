@@ -1,3 +1,9 @@
 # Keep project knowledge files local; never commit them.
 .knowledges/
 .knowdges/
+
+# Local runtime data and build artifacts
+/.buckboat-data/
+/buckboat
+/coverage.out
+*.test

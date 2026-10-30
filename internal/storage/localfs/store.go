@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rachmanzz/buckboat/internal/storage/fsdir"
 	"github.com/rachmanzz/buckboat/internal/storage/ports"
 )
 
@@ -89,7 +90,7 @@ func Open(cfg Config) (*Store, error) {
 	if filepath.Clean(root) == string(os.PathSeparator) {
 		return nil, fmt.Errorf("local storage root must not be the filesystem root")
 	}
-	if err := os.MkdirAll(root, 0o700); err != nil {
+	if err := fsdir.Ensure(root); err != nil {
 		return nil, fmt.Errorf("create local storage root: %w", err)
 	}
 	lockFile, err := acquireRootLock(root)
@@ -746,19 +747,11 @@ func validObjectKey(key string) bool {
 }
 
 func syncDir(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return fsdir.Sync(path)
 }
 
 func ensurePrivateDir(path string) error {
-	if err := os.MkdirAll(path, 0o700); err != nil {
-		return err
-	}
-	return os.Chmod(path, 0o700)
+	return fsdir.EnsurePrivate(path)
 }
 
 func isEmptyDir(path string) (bool, error) {

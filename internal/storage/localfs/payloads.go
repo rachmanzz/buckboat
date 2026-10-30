@@ -154,16 +154,33 @@ func (s *Store) PutPayload(ctx context.Context, input ports.PutObjectInput) (por
 	payloadRef := hex.EncodeToString(idBytes[:])
 	payloadDir := filepath.Join(s.root, "payloads")
 	finalPath := filepath.Join(payloadDir, payloadRef+".bin")
-	if err := os.Rename(tmpName, finalPath); err != nil {
-		return ports.ObjectInfo{}, "", fmt.Errorf("publish staged payload: %w", err)
-	}
-	if err := syncDir(payloadDir); err != nil {
-		return ports.ObjectInfo{}, "", fmt.Errorf("sync published payload directory: %w", err)
-	}
-	if err := syncDir(stagingDir); err != nil {
-		return ports.ObjectInfo{}, "", fmt.Errorf("sync payload staging directory: %w", err)
+	if err := publishPayload(tmpName, finalPath, syncDir); err != nil {
+		return ports.ObjectInfo{}, "", err
 	}
 	return info, payloadRef, nil
+}
+
+func publishPayload(staged, final string, syncDirectory func(string) error) (publishErr error) {
+	if err := os.Rename(staged, final); err != nil {
+		return fmt.Errorf("publish staged payload: %w", err)
+	}
+	defer func() {
+		if publishErr != nil {
+			if err := os.Remove(final); err != nil && !errors.Is(err, os.ErrNotExist) {
+				publishErr = errors.Join(publishErr, fmt.Errorf("remove unpublished payload: %w", err))
+			}
+			if err := syncDirectory(filepath.Dir(final)); err != nil {
+				publishErr = errors.Join(publishErr, fmt.Errorf("sync unpublished payload cleanup: %w", err))
+			}
+		}
+	}()
+	if err := syncDirectory(filepath.Dir(final)); err != nil {
+		return fmt.Errorf("sync published payload directory: %w", err)
+	}
+	if err := syncDirectory(filepath.Dir(staged)); err != nil {
+		return fmt.Errorf("sync payload staging directory: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) OpenPayload(ctx context.Context, payloadRef string) (io.ReadSeekCloser, error) {

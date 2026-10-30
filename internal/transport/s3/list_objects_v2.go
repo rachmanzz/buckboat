@@ -20,6 +20,10 @@ import (
 
 const listObjectsV2XMLNamespace = "http://s3.amazonaws.com/doc/2006-03-01/"
 
+// A cursor and start-after are at most 1024 bytes each. JSON can expand each
+// byte to six characters before base64; this bound covers that worst case.
+const maxListV2TokenBytes = 32 << 10
+
 var (
 	errUnsupportedListQuery = errors.New("unsupported ListObjectsV2 query parameter")
 	errInvalidListQuery     = errors.New("invalid ListObjectsV2 query parameter")
@@ -76,12 +80,11 @@ type listV2CommonPrefix struct {
 	Prefix string `xml:"Prefix"`
 }
 
-func (h *handler) serveBucketQuery(w http.ResponseWriter, r *http.Request, requestID string, target resource) {
+func (h *handler) serveBucketQuery(w http.ResponseWriter, r *http.Request, requestID string, target resource, rawQuery string) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusNotImplemented, "NotImplemented", "This bucket query operation is not implemented yet", requestID, requestPath(r))
 		return
 	}
-	_, rawQuery := requestTarget(r)
 	params, err := parseListV2Parameters(rawQuery, target.bucket)
 	if err != nil {
 		writeListQueryError(w, err, requestID, requestPath(r))
@@ -239,6 +242,10 @@ func (h *handler) writeListV2Response(w http.ResponseWriter, page ports.ObjectLi
 		}
 		response.NextContinuationToken = token
 	}
+	if !listV2XMLSafe(response) {
+		writeError(w, http.StatusBadRequest, "InvalidArgument", "A response value cannot be represented in XML; use encoding-type=url", requestID, resource)
+		return
+	}
 	body, err := xml.Marshal(response)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "InvalidArgument", "A response value cannot be represented in XML; use encoding-type=url", requestID, resource)
@@ -253,7 +260,41 @@ func encodeListResponseValue(value string) string {
 	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
 }
 
+func listV2XMLSafe(response listV2Response) bool {
+	for _, value := range []string{response.Name, response.Prefix, response.Delimiter, response.StartAfter} {
+		if !validXMLText(value) {
+			return false
+		}
+	}
+	for _, object := range response.Contents {
+		if !validXMLText(object.Key) {
+			return false
+		}
+	}
+	for _, prefix := range response.CommonPrefixes {
+		if !validXMLText(prefix.Prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+func validXMLText(value string) bool {
+	if !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r != '\t' && r != '\n' && r != '\r' && !(r >= 0x20 && r <= 0xd7ff) && !(r >= 0xe000 && r <= 0xfffd) && !(r >= 0x10000 && r <= 0x10ffff) {
+			return false
+		}
+	}
+	return true
+}
+
 func (h *handler) encodeListV2Token(params listV2Parameters, cursor ports.ObjectListCursor) (string, error) {
+	if !validListV2Cursor(cursor, params.prefix, params.delimiter, params.tokenStartAfter) {
+		return "", errInvalidListToken
+	}
 	payload, err := json.Marshal(listV2Token{
 		Version: 1, ScopeHash: listV2ScopeHash(params.bucket, params.prefix, params.delimiter, params.tokenStartAfter),
 		StartAfter: params.tokenStartAfter, Cursor: cursor,
@@ -264,11 +305,15 @@ func (h *handler) encodeListV2Token(params listV2Parameters, cursor ports.Object
 	mac := hmac.New(sha256.New, []byte("buckboat:list-objects-v2\x00"+h.auth.SecretAccessKey))
 	_, _ = mac.Write(payload)
 	sealed := append(payload, mac.Sum(nil)...)
-	return base64.RawURLEncoding.EncodeToString(sealed), nil
+	token := base64.RawURLEncoding.EncodeToString(sealed)
+	if len(token) > maxListV2TokenBytes {
+		return "", errInvalidListToken
+	}
+	return token, nil
 }
 
 func (h *handler) decodeListV2Token(token string, params listV2Parameters) (ports.ObjectListCursor, string, error) {
-	if len(token) > 8192 {
+	if len(token) > maxListV2TokenBytes {
 		return ports.ObjectListCursor{}, "", errInvalidListToken
 	}
 	sealed, err := base64.RawURLEncoding.DecodeString(token)
@@ -291,22 +336,25 @@ func (h *handler) decodeListV2Token(token string, params listV2Parameters) (port
 	if params.startAfterPresent && params.startAfter != decoded.StartAfter {
 		return ports.ObjectListCursor{}, "", errInvalidListToken
 	}
-	if !utf8.ValidString(decoded.StartAfter) || len(decoded.StartAfter) > 1024 || !utf8.ValidString(decoded.Cursor.Key) || !utf8.ValidString(decoded.Cursor.StartAfter) || len(decoded.Cursor.StartAfter) > 1024 {
-		return ports.ObjectListCursor{}, "", errInvalidListToken
-	}
-	if decoded.Cursor.IsCommonPrefix && (decoded.Cursor.Key == "" || params.delimiter == "" || !strings.HasPrefix(decoded.Cursor.Key, params.prefix) || !strings.HasSuffix(decoded.Cursor.Key, params.delimiter)) {
-		return ports.ObjectListCursor{}, "", errInvalidListToken
-	}
-	if decoded.Cursor.Key != "" && !decoded.Cursor.IsCommonPrefix && !strings.HasPrefix(decoded.Cursor.Key, params.prefix) {
-		return ports.ObjectListCursor{}, "", errInvalidListToken
-	}
-	if decoded.Cursor.Key != "" && decoded.Cursor.StartAfter != "" {
-		return ports.ObjectListCursor{}, "", errInvalidListToken
-	}
-	if decoded.Cursor.Key == "" && decoded.Cursor.StartAfter != decoded.StartAfter {
+	if !validListV2Cursor(decoded.Cursor, params.prefix, params.delimiter, decoded.StartAfter) {
 		return ports.ObjectListCursor{}, "", errInvalidListToken
 	}
 	return decoded.Cursor, decoded.StartAfter, nil
+}
+
+func validListV2Cursor(cursor ports.ObjectListCursor, prefix, delimiter, startAfter string) bool {
+	for _, value := range []string{cursor.Key, cursor.StartAfter, startAfter} {
+		if len(value) > 1024 || !utf8.ValidString(value) {
+			return false
+		}
+	}
+	if cursor.Key == "" {
+		return !cursor.IsCommonPrefix && cursor.StartAfter == startAfter
+	}
+	if cursor.StartAfter != "" || !strings.HasPrefix(cursor.Key, prefix) {
+		return false
+	}
+	return !cursor.IsCommonPrefix || delimiter != "" && strings.HasSuffix(cursor.Key, delimiter)
 }
 
 func listV2ScopeHash(bucket, prefix, delimiter, startAfter string) string {

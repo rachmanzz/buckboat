@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	sqlite3 "github.com/mattn/go-sqlite3"
+	"github.com/rachmanzz/buckboat/internal/storage/fsdir"
 	"github.com/rachmanzz/buckboat/internal/storage/ports"
 )
 
@@ -39,11 +40,8 @@ func OpenCatalog(path string) (*Catalog, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve SQLite catalog path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o700); err != nil {
+	if err := fsdir.EnsurePrivate(filepath.Dir(absPath)); err != nil {
 		return nil, fmt.Errorf("create SQLite catalog directory: %w", err)
-	}
-	if err := os.Chmod(filepath.Dir(absPath), 0o700); err != nil {
-		return nil, fmt.Errorf("secure SQLite catalog directory: %w", err)
 	}
 
 	db, err := sql.Open("sqlite3", dataSourceName(absPath))
@@ -221,7 +219,13 @@ func (c *Catalog) DeleteBucket(ctx context.Context, name string) error {
 	return nil
 }
 
-func (c *Catalog) PublishObject(ctx context.Context, object ports.CatalogObject) (string, error) {
+func (c *Catalog) PublishObject(ctx context.Context, object ports.CatalogObject) (previousRef string, publishErr error) {
+	commitAttempted := false
+	defer func() {
+		if publishErr != nil && !commitAttempted {
+			publishErr = errors.Join(ports.ErrPublishNotCommitted, publishErr)
+		}
+	}()
 	info := object.Info
 	if !ports.ValidBucketName(info.Bucket) {
 		return "", ports.ErrInvalidBucket
@@ -279,6 +283,7 @@ func (c *Catalog) PublishObject(ctx context.Context, object ports.CatalogObject)
 		}
 		return "", fmt.Errorf("write SQLite object record: %w", catalogError(err))
 	}
+	commitAttempted = true
 	if err := tx.Commit(); err != nil {
 		return "", fmt.Errorf("commit SQLite object publish: %w", catalogError(err))
 	}
@@ -643,10 +648,5 @@ func (c *Catalog) Close() error {
 }
 
 func syncDir(path string) error {
-	dir, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer dir.Close()
-	return dir.Sync()
+	return fsdir.Sync(path)
 }

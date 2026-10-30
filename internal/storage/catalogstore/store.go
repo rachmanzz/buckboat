@@ -5,6 +5,7 @@ package catalogstore
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"sync"
@@ -59,7 +60,7 @@ func (s *Store) PutObject(ctx context.Context, input ports.PutObjectInput) (port
 	}
 	if err := ctx.Err(); err != nil {
 		if cleanupErr := s.payloads.DeletePayload(context.Background(), payloadRef); cleanupErr != nil {
-			slog.Error("remove canceled payload before catalog publish", "error", cleanupErr)
+			err = errors.Join(err, fmt.Errorf("remove canceled payload before catalog publish: %w", cleanupErr))
 		}
 		return ports.ObjectInfo{}, err
 	}
@@ -67,9 +68,9 @@ func (s *Store) PutObject(ctx context.Context, input ports.PutObjectInput) (port
 	defer s.mu.Unlock()
 	previousRef, err := s.catalog.PublishObject(ctx, ports.CatalogObject{Info: info, PayloadRef: payloadRef})
 	if err != nil {
-		if errors.Is(err, ports.ErrBucketNotFound) {
+		if errors.Is(err, ports.ErrPublishNotCommitted) {
 			if cleanupErr := s.payloads.DeletePayload(context.Background(), payloadRef); cleanupErr != nil {
-				slog.Error("remove unpublished payload after missing bucket", "error", cleanupErr)
+				err = errors.Join(err, fmt.Errorf("remove unpublished payload: %w", cleanupErr))
 			}
 		}
 		return ports.ObjectInfo{}, err
@@ -112,6 +113,16 @@ func (s *Store) OpenObject(ctx context.Context, bucket, key string) (ports.Objec
 	body, err := s.payloads.OpenPayload(ctx, object.PayloadRef)
 	if err != nil {
 		return ports.ObjectInfo{}, nil, err
+	}
+	size, err := body.Seek(0, io.SeekEnd)
+	if err == nil && size != object.Info.Size {
+		err = fmt.Errorf("%w: expected %d bytes, found %d", ports.ErrCorruptObject, object.Info.Size, size)
+	}
+	if err == nil {
+		_, err = body.Seek(0, io.SeekStart)
+	}
+	if err != nil {
+		return ports.ObjectInfo{}, nil, errors.Join(err, body.Close())
 	}
 	return object.Info, body, nil
 }

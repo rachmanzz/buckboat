@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sort"
 	"strings"
 	"testing"
@@ -139,7 +140,7 @@ func signedRequest(t *testing.T, method, target string, body []byte, headers htt
 	canonical := strings.Join([]string{
 		method,
 		canonicalURIForTest(target),
-		"",
+		canonicalQueryForTest(t, req.URL.RawQuery),
 		canonicalHeaders.String(),
 		strings.Join(names, ";"),
 		payloadHash,
@@ -154,6 +155,18 @@ func signedRequest(t *testing.T, method, target string, body []byte, headers htt
 	signature := hex.EncodeToString(hmacSHA256ForTest(key, []byte(stringToSign)))
 	req.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential="+accessKey+"/"+scope+", SignedHeaders="+strings.Join(names, ";")+", Signature="+signature)
 	return req
+}
+
+func canonicalQueryForTest(t *testing.T, raw string) string {
+	t.Helper()
+	values, err := url.ParseQuery(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, items := range values {
+		sort.Strings(items)
+	}
+	return strings.ReplaceAll(values.Encode(), "+", "%20")
 }
 
 func canonicalURIForTest(target string) string {

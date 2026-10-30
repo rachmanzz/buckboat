@@ -26,6 +26,8 @@ var (
 	ErrMetadataTooLarge    = errors.New("object metadata exceeds the supported size limit")
 	ErrInvalidMetadata     = errors.New("user metadata contains non-ASCII bytes")
 	ErrBusy                = errors.New("storage is busy")
+	ErrPublishNotCommitted = errors.New("object publication did not commit")
+	ErrCorruptObject       = errors.New("object payload does not match catalog metadata")
 )
 
 var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
@@ -137,7 +139,9 @@ type ObjectLister interface {
 }
 
 // Catalog is Buckboat's semantic metadata contract. Implementations own their
-// schema, transactions, and engine-specific types.
+// schema, transactions, and engine-specific types. PublishObject errors known
+// to precede a commit must wrap ErrPublishNotCommitted. Other errors have an
+// uncertain outcome; callers must retain the candidate payload.
 type Catalog interface {
 	CreateBucket(context.Context, string) error
 	HeadBucket(context.Context, string) error

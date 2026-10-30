@@ -20,6 +20,10 @@ tested against AWS.
 The local profile caps stored user metadata at 2 KiB and its serialized object
 metadata record at 64 KiB; these are implementation limits.
 
+Listing values containing characters XML 1.0 cannot represent require
+`encoding-type=url`. Without it, the server returns `InvalidArgument` instead
+of replacing characters in an object key.
+
 This is a limited development profile, not full S3 compatibility. It uses one
 static access key/secret pair with full access to this local store. It has no
 IAM policy engine or tenant isolation. Virtual-hosted requests, presigned
@@ -96,6 +100,11 @@ authorization before network exposure. This profile does not enforce total
 upload/download deadlines, so a connected slow client can hold a bounded
 operation slot until it disconnects.
 
+Payloads are removed after publication errors known to precede a catalog
+commit. Uncertain commit outcomes retain their payloads to preserve potentially
+committed data. Automatic reconciliation of those files and crash orphans is
+not implemented yet.
+
 `/health/live` reports process liveness. `/health/ready` is ready after the
 local store opens. The Document API returns `NotImplemented` until its session,
 node, and format-adapter work is implemented.
@@ -112,7 +121,10 @@ Existing tests cover the AWS SigV4 example vector, rejected signature tampering
 and unsigned behavior headers, the configured single-PUT size cap, the stored
 metadata size bound, local object replacement/reopen/delete, path-safe object
 keys, delete/upload admission ordering, the single-process lock, and the signed
-bucket/object HTTP lifecycle including a range GET. They exercise the earlier
-local filesystem store and do not cover the SQLite catalog or ListObjectsV2.
+bucket/object HTTP lifecycle including a range GET. SQLite-backed tests also
+cover lifecycle/reopen, publication failure cleanup, conservative commit-error
+handling, payload size integrity, object-list pagination and delimiter grouping,
+operation hints, maximum escaped cursor sizes, and XML-safe listing behavior.
+Directory-sync fault tests cover initialization and unpublished-file cleanup.
 They do not establish AWS-wide conformance or production durability across
 device failure.

@@ -72,12 +72,19 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if resource.hasQuery {
-		if resource.bucket == "" || resource.hasKey {
-			writeError(w, http.StatusNotImplemented, "NotImplemented", "This S3 query operation is not implemented yet", requestID, requestPath(r))
+		query, err := operationQuery(r, resource)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "InvalidArgument", "The request query is invalid", requestID, requestPath(r))
 			return
 		}
-		h.serveBucketQuery(w, r, requestID, resource)
-		return
+		if len(query) != 0 {
+			if resource.bucket == "" || resource.hasKey {
+				writeError(w, http.StatusNotImplemented, "NotImplemented", "This S3 query operation is not implemented yet", requestID, requestPath(r))
+				return
+			}
+			h.serveBucketQuery(w, r, requestID, resource, query.Encode())
+			return
+		}
 	}
 	if resource.bucket == "" {
 		if r.Method == http.MethodGet {
@@ -93,6 +100,49 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.serveObject(w, r, requestID, resource)
+}
+
+// The operation hint is inert routing metadata. Verification above must still
+// cover the original query, including x-id, without rewriting the request.
+func operationQuery(r *http.Request, target resource) (url.Values, error) {
+	_, rawQuery := requestTarget(r)
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		return nil, err
+	}
+	if hint, present := query["x-id"]; present {
+		expected := ""
+		if target.hasKey {
+			switch r.Method {
+			case http.MethodGet:
+				expected = "GetObject"
+			case http.MethodHead:
+				expected = "HeadObject"
+			case http.MethodPut:
+				expected = "PutObject"
+			case http.MethodDelete:
+				expected = "DeleteObject"
+			}
+		} else {
+			switch r.Method {
+			case http.MethodPut:
+				expected = "CreateBucket"
+			case http.MethodHead:
+				expected = "HeadBucket"
+			case http.MethodDelete:
+				expected = "DeleteBucket"
+			case http.MethodGet:
+				if query.Get("list-type") == "2" {
+					expected = "ListObjectsV2"
+				}
+			}
+		}
+		if len(hint) != 1 || expected == "" || hint[0] != expected {
+			return nil, fmt.Errorf("invalid S3 operation hint")
+		}
+		query.Del("x-id")
+	}
+	return query, nil
 }
 
 type resource struct {

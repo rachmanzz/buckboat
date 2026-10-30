@@ -3,10 +3,14 @@ package server
 import (
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/rachmanzz/buckboat/internal/storage/catalogstore"
 	"github.com/rachmanzz/buckboat/internal/storage/localfs"
+	"github.com/rachmanzz/buckboat/internal/storage/ports"
+	"github.com/rachmanzz/buckboat/internal/storage/sqlite"
 	"github.com/rachmanzz/buckboat/internal/transport/document"
 	"github.com/rachmanzz/buckboat/internal/transport/health"
 	"github.com/rachmanzz/buckboat/internal/transport/s3"
@@ -19,6 +23,7 @@ type Config struct {
 	DocumentAddr       string
 	HealthAddr         string
 	DataDir            string
+	CatalogAdapter     string
 	AccessKeyID        string
 	SecretAccessKey    string
 	Region             string
@@ -28,9 +33,10 @@ type Config struct {
 }
 
 type Runtime struct {
-	servers  []*http.Server
-	store    *localfs.Store
-	requests sync.WaitGroup
+	servers    []*http.Server
+	store      ports.ObjectStore
+	closeStore func() error
+	requests   sync.WaitGroup
 }
 
 func DefaultConfig() Config {
@@ -39,6 +45,7 @@ func DefaultConfig() Config {
 		DocumentAddr:       "127.0.0.1:9401",
 		HealthAddr:         "127.0.0.1:9402",
 		DataDir:            "./.buckboat-data",
+		CatalogAdapter:     "sqlite",
 		Region:             "us-east-1",
 		MaxObjectBytes:     maxSinglePutBytes,
 		MaxConcurrentPuts:  16,
@@ -64,6 +71,9 @@ func New(cfg Config) (*Runtime, error) {
 	if cfg.Region == "" || cfg.DataDir == "" {
 		return nil, fmt.Errorf("storage region and data directory are required")
 	}
+	if cfg.CatalogAdapter != "sqlite" {
+		return nil, fmt.Errorf("unsupported catalog adapter %q", cfg.CatalogAdapter)
+	}
 	if cfg.MaxObjectBytes <= 0 || cfg.MaxObjectBytes > maxSinglePutBytes {
 		return nil, fmt.Errorf("maximum object size must be between 1 and %d bytes", maxSinglePutBytes)
 	}
@@ -71,17 +81,31 @@ func New(cfg Config) (*Runtime, error) {
 		return nil, fmt.Errorf("maximum concurrent PUT and read counts must be positive")
 	}
 
-	store, err := localfs.Open(localfs.Config{
+	legacyData, err := localfs.HasLegacyCatalogData(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("inspect existing local catalog data: %w", err)
+	}
+	if legacyData {
+		return nil, fmt.Errorf("legacy filesystem catalog data found in %q; migrate it before using the SQLite catalog adapter", cfg.DataDir)
+	}
+
+	payloads, err := localfs.Open(localfs.Config{
 		RootDir:            cfg.DataDir,
 		MaxObjectBytes:     cfg.MaxObjectBytes,
 		MaxConcurrentPuts:  cfg.MaxConcurrentPuts,
 		MaxConcurrentReads: cfg.MaxConcurrentReads,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("open local object store: %w", err)
+		return nil, fmt.Errorf("open local payload store: %w", err)
+	}
+	catalog, err := sqlite.OpenCatalog(filepath.Join(cfg.DataDir, "catalog", "buckboat.sqlite"))
+	if err != nil {
+		_ = payloads.Close()
+		return nil, err
 	}
 
-	runtime := &Runtime{store: store}
+	store := catalogstore.New(catalog, payloads)
+	runtime := &Runtime{store: store, closeStore: store.Close}
 	runtime.servers = []*http.Server{
 		newHTTPServer(cfg.S3Addr, runtime.track(s3.NewRouter(store, s3.AuthConfig{
 			AccessKeyID:     cfg.AccessKeyID,
@@ -96,14 +120,14 @@ func New(cfg Config) (*Runtime, error) {
 
 // Close releases storage resources after Run has stopped the listeners.
 func (r *Runtime) Close() error {
-	if r == nil || r.store == nil {
+	if r == nil || r.closeStore == nil {
 		return nil
 	}
 	// Run closes listeners before Close is called. Wait for request handlers to
 	// unwind (including forced connection-close paths) before releasing the
 	// local root lock to another process.
 	r.requests.Wait()
-	return r.store.Close()
+	return r.closeStore()
 }
 
 func (r *Runtime) track(next http.Handler) http.Handler {

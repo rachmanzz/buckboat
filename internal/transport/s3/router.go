@@ -67,16 +67,24 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "InvalidURI", "The request URI is invalid", requestID, requestPath(r))
 		return
 	}
-	if resource.hasQuery {
-		writeError(w, http.StatusNotImplemented, "NotImplemented", "This S3 query operation is not implemented yet", requestID, requestPath(r))
-		return
-	}
 	if hasUnsupportedS3Header(r) {
 		writeError(w, http.StatusNotImplemented, "NotImplemented", "The request uses an S3 header whose behavior is not implemented yet", requestID, requestPath(r))
 		return
 	}
+	if resource.hasQuery {
+		if resource.bucket == "" || resource.hasKey {
+			writeError(w, http.StatusNotImplemented, "NotImplemented", "This S3 query operation is not implemented yet", requestID, requestPath(r))
+			return
+		}
+		h.serveBucketQuery(w, r, requestID, resource)
+		return
+	}
 	if resource.bucket == "" {
-		writeError(w, http.StatusNotImplemented, "NotImplemented", "ListBuckets is not implemented yet", requestID, requestPath(r))
+		if r.Method == http.MethodGet {
+			writeError(w, http.StatusNotImplemented, "NotImplemented", "ListBuckets is not implemented yet", requestID, requestPath(r))
+			return
+		}
+		writeError(w, http.StatusNotImplemented, "NotImplemented", "This bucket operation is not implemented yet", requestID, requestPath(r))
 		return
 	}
 

@@ -17,11 +17,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/rachmanzz/buckboat/internal/storage/ports"
 )
@@ -29,8 +27,6 @@ import (
 const trailerMagic = "BBOTOBJ1"
 const maxUserMetadataBytes = 2 << 10
 const maxObjectMetadataBytes = 64 << 10
-
-var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 
 type Config struct {
 	RootDir            string
@@ -111,6 +107,8 @@ func Open(cfg Config) (*Store, error) {
 		filepath.Join(root, "catalog", "buckets"),
 		filepath.Join(root, "catalog", "objects"),
 		filepath.Join(root, "catalog", "staging"),
+		filepath.Join(root, "payloads"),
+		filepath.Join(root, "payload-staging"),
 	} {
 		if err := ensurePrivateDir(dir); err != nil {
 			_ = store.Close()
@@ -120,6 +118,10 @@ func Open(cfg Config) (*Store, error) {
 	if err := store.cleanInterruptedUploads(); err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("clean interrupted local uploads: %w", err)
+	}
+	if err := store.cleanInterruptedPayloadUploads(); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("clean interrupted payload uploads: %w", err)
 	}
 	return store, nil
 }
@@ -736,14 +738,11 @@ func hashName(value string) string {
 }
 
 func validBucketName(name string) bool {
-	if !bucketPattern.MatchString(name) || strings.Contains(name, "..") || strings.Contains(name, ".-") || strings.Contains(name, "-.") {
-		return false
-	}
-	return len(name) >= 3 && len(name) <= 63
+	return ports.ValidBucketName(name)
 }
 
 func validObjectKey(key string) bool {
-	return key != "" && len(key) <= 1024 && utf8.ValidString(key)
+	return ports.ValidObjectKey(key)
 }
 
 func syncDir(path string) error {

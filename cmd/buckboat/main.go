@@ -26,6 +26,7 @@ func run() error {
 	cfg.DocumentAddr = envOr("BUCKBOAT_DOCUMENT_ADDR", cfg.DocumentAddr)
 	cfg.HealthAddr = envOr("BUCKBOAT_HEALTH_ADDR", cfg.HealthAddr)
 	cfg.DataDir = envOr("BUCKBOAT_DATA_DIR", cfg.DataDir)
+	cfg.CatalogAdapter = envOr("BUCKBOAT_CATALOG_ADAPTER", cfg.CatalogAdapter)
 	cfg.AccessKeyID = os.Getenv("BUCKBOAT_ACCESS_KEY_ID")
 	cfg.SecretAccessKey = os.Getenv("BUCKBOAT_SECRET_ACCESS_KEY")
 	cfg.Region = envOr("BUCKBOAT_REGION", cfg.Region)

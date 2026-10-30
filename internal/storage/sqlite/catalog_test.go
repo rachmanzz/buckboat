@@ -44,6 +44,92 @@ func TestPublicationOutcomeSeparatesPreCommitAndCommitErrors(t *testing.T) {
 	}
 }
 
+func TestFindPayloadRefsReturnsOnlyCatalogReferences(t *testing.T) {
+	c, err := OpenCatalog(filepath.Join(t.TempDir(), "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.CreateBucket(t.Context(), "test-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	for i, ref := range []string{"live-a", "live-b"} {
+		_, err := c.PublishObject(t.Context(), ports.CatalogObject{
+			Info:       ports.ObjectInfo{Bucket: "test-bucket", Key: fmt.Sprintf("key-%d", i), LastModified: time.Now()},
+			PayloadRef: ref,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := c.FindPayloadRefs(t.Context(), []string{"live-a", "orphan", "live-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]struct{}{"live-a": {}, "live-b": {}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("referenced refs=%v want=%v", got, want)
+	}
+	empty, err := c.FindPayloadRefs(t.Context(), nil)
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("empty refs=%v err=%v", empty, err)
+	}
+	tooMany := make([]string, ports.MaxPayloadRefBatchSize+1)
+	if _, err := c.FindPayloadRefs(t.Context(), tooMany); !errors.Is(err, ports.ErrInvalidArgument) {
+		t.Fatalf("oversized batch error=%v", err)
+	}
+}
+
+func TestOpenCatalogMigratesVersionOnePayloadReferenceIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "catalog.sqlite")
+	c, err := OpenCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.CreateBucket(t.Context(), "test-bucket"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PublishObject(t.Context(), ports.CatalogObject{
+		Info:       ports.ObjectInfo{Bucket: "test-bucket", Key: "keep", Size: 5, LastModified: time.Now()},
+		PayloadRef: "kept-payload",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.ExecContext(t.Context(), `DROP INDEX objects_payload_ref_idx`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.db.ExecContext(t.Context(), `PRAGMA user_version = 1`); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := OpenCatalog(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer migrated.Close()
+	var version int
+	if err := migrated.db.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 2 {
+		t.Fatalf("schema version=%d want=2", version)
+	}
+	var indexes int
+	if err := migrated.db.QueryRowContext(t.Context(), `SELECT count(*) FROM sqlite_master WHERE type='index' AND name='objects_payload_ref_idx'`).Scan(&indexes); err != nil {
+		t.Fatal(err)
+	}
+	if indexes != 1 {
+		t.Fatalf("payload ref indexes=%d want=1", indexes)
+	}
+	object, err := migrated.GetObject(t.Context(), "test-bucket", "keep")
+	if err != nil || object.PayloadRef != "kept-payload" {
+		t.Fatalf("migrated object payload=%q err=%v", object.PayloadRef, err)
+	}
+}
+
 type expectedListEntry struct {
 	Key   string
 	Group bool

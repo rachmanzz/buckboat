@@ -102,8 +102,12 @@ operation slot until it disconnects.
 
 Payloads are removed after publication errors known to precede a catalog
 commit. Uncertain commit outcomes retain their payloads to preserve potentially
-committed data. Automatic reconciliation of those files and crash orphans is
-not implemented yet.
+committed data. On startup, after acquiring the local root lock and opening the
+SQLite catalog, Buckboat scans payload files in bounded batches and removes
+only files confirmed to be unreferenced. A catalog lookup or cleanup error
+stops startup. This recovers payloads left by crashes or uncertain commit
+outcomes on the next successful startup; it does not verify same-size content
+corruption or protect against device failure.
 
 `/health/live` reports process liveness. `/health/ready` is ready after the
 local store opens. The Document API returns `NotImplemented` until its session,

@@ -34,6 +34,10 @@ var bucketPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$`)
 
 const MaxObjectListPageSize = 1000
 
+// MaxPayloadRefBatchSize bounds catalog checks and filesystem scans used by
+// startup payload recovery.
+const MaxPayloadRefBatchSize = 256
+
 func ValidBucketName(name string) bool {
 	if !bucketPattern.MatchString(name) || strings.Contains(name, "..") || strings.Contains(name, ".-") || strings.Contains(name, "-.") {
 		return false
@@ -148,6 +152,7 @@ type Catalog interface {
 	DeleteBucket(context.Context, string) error
 	PublishObject(context.Context, CatalogObject) (previousPayloadRef string, err error)
 	GetObject(context.Context, string, string) (CatalogObject, error)
+	FindPayloadRefs(context.Context, []string) (map[string]struct{}, error)
 	ListObjects(context.Context, ObjectListQuery) (ObjectListPage, error)
 	DeleteObject(context.Context, string, string) (payloadRef string, err error)
 	Close() error
@@ -159,5 +164,7 @@ type PayloadStore interface {
 	PutPayload(context.Context, PutObjectInput) (ObjectInfo, string, error)
 	OpenPayload(context.Context, string) (io.ReadSeekCloser, error)
 	DeletePayload(context.Context, string) error
+	DeletePayloads(context.Context, []string) error
+	WalkPayloadRefs(context.Context, int, func([]string) error) error
 	Close() error
 }

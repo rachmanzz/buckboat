@@ -214,22 +214,90 @@ func (s *Store) OpenPayload(ctx context.Context, payloadRef string) (io.ReadSeek
 }
 
 func (s *Store) DeletePayload(ctx context.Context, payloadRef string) error {
+	return s.DeletePayloads(ctx, []string{payloadRef})
+}
+
+// DeletePayloads removes a bounded set of immutable payloads and syncs their
+// directory once after the removals.
+func (s *Store) DeletePayloads(ctx context.Context, payloadRefs []string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if !validPayloadRef(payloadRef) {
+	if len(payloadRefs) > ports.MaxPayloadRefBatchSize {
 		return ports.ErrInvalidArgument
 	}
-	path := filepath.Join(s.root, "payloads", payloadRef+".bin")
-	if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("remove immutable payload: %w", err)
+	for _, payloadRef := range payloadRefs {
+		if !validPayloadRef(payloadRef) {
+			return ports.ErrInvalidArgument
+		}
 	}
-	if err := syncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("sync payload deletion: %w", err)
+
+	var deleteErr error
+	removed := false
+	for _, payloadRef := range payloadRefs {
+		if err := ctx.Err(); err != nil {
+			deleteErr = errors.Join(deleteErr, err)
+			break
+		}
+		path := filepath.Join(s.root, "payloads", payloadRef+".bin")
+		if err := os.Remove(path); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("remove immutable payload %s: %w", payloadRef, err))
+			continue
+		}
+		removed = true
 	}
-	return nil
+	if removed {
+		if err := syncDir(filepath.Join(s.root, "payloads")); err != nil {
+			deleteErr = errors.Join(deleteErr, fmt.Errorf("sync payload deletion: %w", err))
+		}
+	}
+	return deleteErr
+}
+
+// WalkPayloadRefs visits valid payload filenames in bounded batches. The
+// caller holds the store's root lock, so no other Buckboat process can publish
+// or remove payloads while recovery runs.
+func (s *Store) WalkPayloadRefs(ctx context.Context, batchSize int, visit func([]string) error) (walkErr error) {
+	if batchSize <= 0 || batchSize > ports.MaxPayloadRefBatchSize || visit == nil {
+		return ports.ErrInvalidArgument
+	}
+	dir, err := os.Open(filepath.Join(s.root, "payloads"))
+	if err != nil {
+		return fmt.Errorf("open payload directory for recovery: %w", err)
+	}
+	defer func() {
+		walkErr = errors.Join(walkErr, dir.Close())
+	}()
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		entries, readErr := dir.ReadDir(batchSize)
+		refs := make([]string, 0, len(entries))
+		for _, entry := range entries {
+			if entry.IsDir() || entry.Type()&os.ModeType != 0 || !strings.HasSuffix(entry.Name(), ".bin") {
+				continue
+			}
+			ref := strings.TrimSuffix(entry.Name(), ".bin")
+			if validPayloadRef(ref) {
+				refs = append(refs, ref)
+			}
+		}
+		if len(refs) != 0 {
+			if err := visit(refs); err != nil {
+				return err
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			return nil
+		}
+		if readErr != nil {
+			return fmt.Errorf("read payload directory for recovery: %w", readErr)
+		}
+	}
 }
 
 func (s *Store) cleanInterruptedPayloadUploads() error {

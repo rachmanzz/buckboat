@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
@@ -105,6 +107,13 @@ func New(cfg Config) (*Runtime, error) {
 	}
 
 	store := catalogstore.New(catalog, payloads)
+	if err := store.RecoverPayloads(context.Background()); err != nil {
+		recoveryErr := fmt.Errorf("recover local payloads: %w", err)
+		if closeErr := store.Close(); closeErr != nil {
+			recoveryErr = errors.Join(recoveryErr, fmt.Errorf("close storage after recovery failure: %w", closeErr))
+		}
+		return nil, recoveryErr
+	}
 	runtime := &Runtime{store: store, closeStore: store.Close}
 	runtime.servers = []*http.Server{
 		newHTTPServer(cfg.S3Addr, runtime.track(s3.NewRouter(store, s3.AuthConfig{

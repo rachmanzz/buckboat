@@ -26,6 +26,28 @@ func New(catalog ports.Catalog, payloads ports.PayloadStore) *Store {
 	return &Store{catalog: catalog, payloads: payloads, activePuts: make(map[string]int)}
 }
 
+// RecoverPayloads removes payloads not referenced by the catalog. The caller
+// must hold the payload root lock and keep the store unavailable to requests
+// until recovery finishes.
+func (s *Store) RecoverPayloads(ctx context.Context) error {
+	return s.payloads.WalkPayloadRefs(ctx, ports.MaxPayloadRefBatchSize, func(candidates []string) error {
+		referenced, err := s.catalog.FindPayloadRefs(ctx, candidates)
+		if err != nil {
+			return fmt.Errorf("check catalog payload references: %w", err)
+		}
+		orphans := make([]string, 0, len(candidates))
+		for _, candidate := range candidates {
+			if _, ok := referenced[candidate]; !ok {
+				orphans = append(orphans, candidate)
+			}
+		}
+		if err := s.payloads.DeletePayloads(ctx, orphans); err != nil {
+			return fmt.Errorf("remove orphaned payloads: %w", err)
+		}
+		return nil
+	})
+}
+
 func (s *Store) CreateBucket(ctx context.Context, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

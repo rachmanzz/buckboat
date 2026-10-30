@@ -22,7 +22,7 @@ import (
 
 const (
 	applicationID = 0x4255434b
-	schemaVersion = 1
+	schemaVersion = 2
 )
 
 type Catalog struct {
@@ -96,10 +96,14 @@ func (c *Catalog) migrate(ctx context.Context) error {
 		if version > schemaVersion {
 			return fmt.Errorf("SQLite catalog schema version %d is newer than supported version %d", version, schemaVersion)
 		}
-		if version == schemaVersion {
+		switch version {
+		case schemaVersion:
 			return nil
+		case 1:
+			return c.migrateV1ToV2(ctx)
+		default:
+			return fmt.Errorf("unsupported SQLite catalog schema version %d", version)
 		}
-		return fmt.Errorf("unsupported SQLite catalog schema version %d", version)
 	}
 	if version != 0 {
 		return fmt.Errorf("unrecognized SQLite catalog schema version %d", version)
@@ -139,6 +143,7 @@ func (c *Catalog) migrate(ctx context.Context) error {
 			PRIMARY KEY (bucket, object_key),
 			FOREIGN KEY (bucket) REFERENCES buckets(name) ON DELETE RESTRICT
 		) WITHOUT ROWID`,
+		`CREATE INDEX objects_payload_ref_idx ON objects(payload_ref)`,
 		fmt.Sprintf("PRAGMA application_id = %d", applicationID),
 		fmt.Sprintf("PRAGMA user_version = %d", schemaVersion),
 	}
@@ -149,6 +154,24 @@ func (c *Catalog) migrate(ctx context.Context) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit SQLite catalog migration: %w", catalogError(err))
+	}
+	return nil
+}
+
+func (c *Catalog) migrateV1ToV2(ctx context.Context) error {
+	tx, err := c.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin SQLite catalog migration to version 2: %w", catalogError(err))
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `CREATE INDEX objects_payload_ref_idx ON objects(payload_ref)`); err != nil {
+		return fmt.Errorf("create SQLite payload reference index: %w", catalogError(err))
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 2"); err != nil {
+		return fmt.Errorf("set SQLite catalog schema version 2: %w", catalogError(err))
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit SQLite catalog migration to version 2: %w", catalogError(err))
 	}
 	return nil
 }
@@ -548,6 +571,48 @@ func (c *Catalog) GetObject(ctx context.Context, bucket, key string) (ports.Cata
 		return ports.CatalogObject{}, fmt.Errorf("read SQLite object record: %w", catalogError(err))
 	}
 	return object, nil
+}
+
+// FindPayloadRefs returns which of the supplied immutable payload references
+// are still used by current catalog objects.
+func (c *Catalog) FindPayloadRefs(ctx context.Context, payloadRefs []string) (referenced map[string]struct{}, resultErr error) {
+	referenced = make(map[string]struct{})
+	if len(payloadRefs) == 0 {
+		return referenced, nil
+	}
+	if len(payloadRefs) > ports.MaxPayloadRefBatchSize {
+		return nil, ports.ErrInvalidArgument
+	}
+
+	var query strings.Builder
+	query.WriteString("SELECT DISTINCT payload_ref FROM objects WHERE payload_ref IN (")
+	args := make([]any, len(payloadRefs))
+	for i, ref := range payloadRefs {
+		if i != 0 {
+			query.WriteByte(',')
+		}
+		query.WriteByte('?')
+		args[i] = ref
+	}
+	query.WriteByte(')')
+	rows, err := c.db.QueryContext(ctx, query.String(), args...)
+	if err != nil {
+		return nil, fmt.Errorf("find referenced SQLite payloads: %w", catalogError(err))
+	}
+	defer func() {
+		resultErr = errors.Join(resultErr, rows.Close())
+	}()
+	for rows.Next() {
+		var ref string
+		if err := rows.Scan(&ref); err != nil {
+			return nil, fmt.Errorf("read referenced SQLite payload: %w", catalogError(err))
+		}
+		referenced[ref] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate referenced SQLite payloads: %w", catalogError(err))
+	}
+	return referenced, nil
 }
 
 func (c *Catalog) DeleteObject(ctx context.Context, bucket, key string) (string, error) {

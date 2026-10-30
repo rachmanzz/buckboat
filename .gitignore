@@ -1,0 +1,3 @@
+# Keep project knowledge files local; never commit them.
+.knowledges/
+.knowdges/
